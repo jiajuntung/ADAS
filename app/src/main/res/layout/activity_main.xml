@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:keepScreenOn="true">
+
+    <!-- Back camera full screen preview -->
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Road safety overlay -->
+    <com.example.adas_fyp.SafetyOverlayView
+        android:id="@+id/safetyOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Front camera small preview -->
+    <androidx.camera.view.PreviewView
+        android:id="@+id/frontPreviewView"
+        android:layout_width="220dp"
+        android:layout_height="140dp"
+        android:layout_gravity="top|end"
+        android:layout_margin="16dp"
+        android:background="#80000000" />
+
+    <!-- Status text -->
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="ADAS Running"
+        android:textColor="@android:color/white"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:background="#80000000"
+        android:padding="10dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="16dp"
+        android:layout_gravity="top|start" />
+
+    <!-- FPS text -->
+    <TextView
+        android:id="@+id/fpsText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="FPS: 0"
+        android:textColor="@android:color/white"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:background="#80000000"
+        android:padding="10dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="70dp"
+        android:layout_gravity="top|start" />
+
+    <!-- Warning message -->
+    <TextView
+        android:id="@+id/warningText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="BRAKE!"
+        android:textColor="@android:color/white"
+        android:textSize="32sp"
+        android:textStyle="bold"
+        android:background="#CCFF0000"
+        android:padding="20dp"
+        android:visibility="gone"
+        android:layout_gravity="center" />
+
+    <!-- Bottom test buttons -->
+    <LinearLayout
+        android:id="@+id/testButtonPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:orientation="horizontal"
+        android:padding="12dp"
+        android:background="#80000000">
+
+        <Button
+            android:id="@+id/btnTestFCW"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Test FCW" />
+
+        <Button
+            android:id="@+id/btnTestLDW"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Test LDW" />
+
+        <Button
+            android:id="@+id/btnTestDMS"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Test DMS" />
+
+        <Button
+            android:id="@+id/btnSwitchCamera"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Switch Cam" />
+
+        <Button
+            android:id="@+id/btnDebugMode"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Status ON" />
+
+    </LinearLayout>
+
+</FrameLayout>
