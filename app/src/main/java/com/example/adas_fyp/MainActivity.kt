@@ -61,7 +61,7 @@ class MainActivity : ComponentActivity() {
     private var fcwWarningCounter = 0
     private var lastFcwWarningTime = 0L
     private var fcwDangerActive = false
-    private val fcwWarningThreshold = 2
+    private val fcwWarningThreshold = 3
     private val fcwCooldownMs = 5000L
     private var useBackCamera = true
 
@@ -85,12 +85,39 @@ class MainActivity : ComponentActivity() {
     private lateinit var btnTestFCW: Button
     private lateinit var btnTestLDW: Button
     private lateinit var btnTestDMS: Button
-    private lateinit var btnDebugMode: Button
+    private lateinit var btnStatusMode: Button
+    private lateinit var btnPerformanceMode: Button
+
+    private var ecoMode = false
+
+    private var fcwFrameInterval = 10
+    private var ldwFrameInterval = 3
+    private var dmsFrameInterval = 8
+
+    private lateinit var btnSettings: Button
+    private lateinit var settingsPanel: View
 
     private var debugMode = true
 
     private var fcwSafeCounter = 0
     private val fcwSafeThreshold = 8
+
+    private var leadVehicleSeenStartTime: Long? = null
+    private var leadVehicleWaiting = false
+    private var leadVehicleReferenceArea = 0f
+    private var lastLeadVehicleArea = 0f
+    private var lastLeadVehicleDetectedTime = 0L
+    private var lastLeadVehicleAlertTime = 0L
+    private var latestLeadVehicleStatus = "LVSA: -"
+
+    private val leadVehicleClassIds = setOf(2, 3, 5, 7) // car, motorcycle, bus, truck
+    private val leadVehicleStableMs = 3000L
+    private val leadVehicleMovedDropRatio = 0.35f
+    private val leadVehicleLostGraceMs = 1200L
+    private val leadVehicleAlertCooldownMs = 10000L
+    private val minLeadVehicleAreaRatio = 0.025f
+    private val leadVehicleMinX = 0.38f
+    private val leadVehicleMaxX = 0.62f
 
     private val requestCameraPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -107,6 +134,138 @@ class MainActivity : ComponentActivity() {
         fcwDangerActive = false
         laneDepartureStartTime = null
         eyeClosedStartTime = null
+        resetLeadVehicleState()
+    }
+
+    private fun clearLeadVehicleTracking() {
+        leadVehicleSeenStartTime = null
+        leadVehicleWaiting = false
+        leadVehicleReferenceArea = 0f
+        lastLeadVehicleArea = 0f
+        lastLeadVehicleDetectedTime = 0L
+    }
+
+    private fun resetLeadVehicleState() {
+        clearLeadVehicleTracking()
+        latestLeadVehicleStatus = "LVSA: -"
+    }
+
+    private fun isLeadVehicleCandidate(result: YoloDetectionResult): Boolean {
+        val box = result.boundingBox ?: return false
+
+        if (!result.objectDetected) {
+            return false
+        }
+
+        if (result.classId !in leadVehicleClassIds) {
+            return false
+        }
+
+        if (result.imageWidth <= 0 || result.imageHeight <= 0) {
+            return false
+        }
+
+        val centerX =
+            (box.left + box.width() / 2f) / result.imageWidth.toFloat()
+
+        val bottomY =
+            box.bottom.toFloat() / result.imageHeight.toFloat()
+
+        return centerX in leadVehicleMinX..leadVehicleMaxX &&
+                bottomY >= 0.35f &&
+                result.areaRatio >= minLeadVehicleAreaRatio
+    }
+
+    private fun processLeadVehicleStartAlert(result: YoloDetectionResult) {
+        val currentTime = System.currentTimeMillis()
+        val leadDetected = isLeadVehicleCandidate(result)
+
+        if (leadDetected) {
+            val currentArea = result.areaRatio
+
+            lastLeadVehicleDetectedTime = currentTime
+
+            if (leadVehicleSeenStartTime == null) {
+                leadVehicleSeenStartTime = currentTime
+                leadVehicleReferenceArea = currentArea
+                leadVehicleWaiting = false
+            }
+
+            val observedDuration =
+                currentTime - (leadVehicleSeenStartTime ?: currentTime)
+
+            if (!leadVehicleWaiting) {
+                leadVehicleReferenceArea = maxOf(leadVehicleReferenceArea, currentArea)
+
+                latestLeadVehicleStatus =
+                    "LVSA: observing ${observedDuration / 1000.0}s"
+
+                if (observedDuration >= leadVehicleStableMs) {
+                    leadVehicleWaiting = true
+                    latestLeadVehicleStatus = "LVSA: waiting"
+                }
+            } else {
+                val movedByAreaDrop =
+                    leadVehicleReferenceArea > 0f &&
+                            currentArea <= leadVehicleReferenceArea * (1f - leadVehicleMovedDropRatio)
+
+                latestLeadVehicleStatus =
+                    "LVSA: waiting Area:${String.format("%.3f", currentArea)}"
+
+                if (
+                    movedByAreaDrop &&
+                    !result.collisionWarning &&
+                    currentTime - lastLeadVehicleAlertTime >= leadVehicleAlertCooldownMs
+                ) {
+                    lastLeadVehicleAlertTime = currentTime
+                    latestLeadVehicleStatus = "LVSA: moved"
+
+                    clearLeadVehicleTracking()
+
+                    runOnUiThread {
+                        showWarning(
+                            "FRONT VEHICLE MOVED",
+                            Color.parseColor("#CC2196F3")
+                        )
+                    }
+                }
+            }
+
+            lastLeadVehicleArea = currentArea
+
+        } else {
+            if (leadVehicleWaiting) {
+                val lostDuration = currentTime - lastLeadVehicleDetectedTime
+
+                latestLeadVehicleStatus = "LVSA: waiting / lost"
+
+                if (
+                    lostDuration >= leadVehicleLostGraceMs &&
+                    currentTime - lastLeadVehicleAlertTime >= leadVehicleAlertCooldownMs
+                ) {
+                    lastLeadVehicleAlertTime = currentTime
+                    latestLeadVehicleStatus = "LVSA: moved"
+
+                    clearLeadVehicleTracking()
+
+                    runOnUiThread {
+                        showWarning(
+                            "FRONT VEHICLE MOVED",
+                            Color.parseColor("#CC2196F3")
+                        )
+                    }
+                }
+            } else {
+                if (
+                    leadVehicleSeenStartTime != null &&
+                    currentTime - lastLeadVehicleDetectedTime > leadVehicleLostGraceMs
+                ) {
+                    clearLeadVehicleTracking()
+                }
+
+                latestLeadVehicleStatus = "LVSA: no lead"
+            }
+        }
     }
 
     private fun applyDebugMode() {
@@ -117,7 +276,7 @@ class MainActivity : ComponentActivity() {
         btnTestDMS.visibility = debugVisibility
         fpsText.visibility = debugVisibility
 
-        btnDebugMode.text = if (debugMode) {
+        btnStatusMode.text = if (debugMode) {
             "Status ON"
         } else {
             "Status OFF"
@@ -132,6 +291,24 @@ class MainActivity : ComponentActivity() {
         if (debugMode) {
             updateDualStatusText()
         }
+    }
+
+    private fun applyPerformanceMode() {
+        if (ecoMode) {
+            fcwFrameInterval = 12
+            ldwFrameInterval = 5
+            dmsFrameInterval = 10
+            btnPerformanceMode.text = "Mode: Eco"
+            Toast.makeText(this, "Eco Mode enabled", Toast.LENGTH_SHORT).show()
+        } else {
+            fcwFrameInterval = 10
+            ldwFrameInterval = 3
+            dmsFrameInterval = 8
+            btnPerformanceMode.text = "Mode: Normal"
+            Toast.makeText(this, "Normal Mode enabled", Toast.LENGTH_SHORT).show()
+        }
+
+        updateDualStatusText()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -165,7 +342,21 @@ class MainActivity : ComponentActivity() {
         btnTestFCW = findViewById(R.id.btnTestFCW)
         btnTestLDW = findViewById(R.id.btnTestLDW)
         btnTestDMS = findViewById(R.id.btnTestDMS)
-        btnDebugMode = findViewById(R.id.btnDebugMode)
+        btnStatusMode = findViewById(R.id.btnStatusMode)
+        btnSettings = findViewById(R.id.btnSettings)
+        settingsPanel = findViewById(R.id.settingsPanel)
+        btnPerformanceMode = findViewById(R.id.btnPerformanceMode)
+
+        settingsPanel.visibility = View.GONE
+
+        btnSettings.setOnClickListener {
+            settingsPanel.visibility =
+                if (settingsPanel.visibility == View.VISIBLE) {
+                    View.GONE
+                } else {
+                    View.VISIBLE
+                }
+        }
 
         btnTestFCW.setOnClickListener {
             safetyOverlay.setMode("FCW")
@@ -182,10 +373,18 @@ class MainActivity : ComponentActivity() {
             showWarning("DROWSINESS WARNING", Color.parseColor("#CCFF0000"))
         }
 
-        btnDebugMode.setOnClickListener {
+        btnStatusMode.setOnClickListener {
             debugMode = !debugMode
             applyDebugMode()
         }
+
+        btnPerformanceMode.setOnClickListener {
+            ecoMode = !ecoMode
+            applyPerformanceMode()
+        }
+
+        applyDebugMode()
+        applyPerformanceMode()
 
         switchCameraButton = findViewById(R.id.btnSwitchCamera)
 
@@ -438,7 +637,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val shouldRunFcw =
-            !isFcwProcessing && backAnalysisFrameIndex % 10 == 0
+            !isFcwProcessing && backAnalysisFrameIndex % fcwFrameInterval  == 0
 
         if (shouldRunFcw) {
             isFcwProcessing = true
@@ -452,6 +651,8 @@ class MainActivity : ComponentActivity() {
                             "Area:${String.format("%.4f", result.areaRatio)} " +
                             "Box:${result.boundingBox?.width() ?: 0}x${result.boundingBox?.height() ?: 0} " +
                             "Warn:${result.collisionWarning}"
+
+                processLeadVehicleStartAlert(result)
 
                 runOnUiThread {
                     safetyOverlay.setFcwBox(
@@ -496,7 +697,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        if (backAnalysisFrameIndex % 3 == 0) {
+        if (backAnalysisFrameIndex % ldwFrameInterval   == 0) {
             val result = laneDetector.detect(imageProxy)
 
             latestLaneStatus =
@@ -571,7 +772,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        if (!isDmsProcessing && frontAnalysisFrameIndex % 8 == 0) {
+        if (!isDmsProcessing && frontAnalysisFrameIndex % dmsFrameInterval == 0) {
             isDmsProcessing = true
 
             drowsinessDetector.detect(imageProxy) { result ->
@@ -625,12 +826,20 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        val performanceText = if (ecoMode) {
+            "Eco Mode"
+        } else {
+            "Normal Mode"
+        }
+
         fpsText.text =
             "System Status\n" +
+                    "$performanceText\n" +
                     "Back FPS: $latestBackFps\n" +
                     "Front FPS: $latestFrontFps\n" +
                     "$latestLaneStatus\n" +
                     "$latestFcwStatus\n" +
+                    "$latestLeadVehicleStatus\n" +
                     "$latestDmsStatus"
     }
 
