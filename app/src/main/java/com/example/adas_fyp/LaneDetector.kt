@@ -27,6 +27,8 @@ class LaneDetector {
     private val minSlope = 0.45
     private val maxSlope = 3.0
     private val warningOffsetRatio = 0.07f
+    private val centerDangerMinX = 0.40f
+    private val centerDangerMaxX = 0.60f
 
     fun detect(imageProxy: ImageProxy): LaneDetectionResult {
         val width = imageProxy.width
@@ -119,8 +121,11 @@ class LaneDetector {
 
                 singleLineOffset = (vehicleCenterX - leftBottomX) / width
 
-                // Left lane line is too close to vehicle center
-                singleLineWarning = leftBottomX > width * 0.38f
+                val leftLineInCenterDangerZone =
+                    leftBottomX in (width * centerDangerMinX)..(width * centerDangerMaxX)
+
+                singleLineWarning =
+                    leftLineInCenterDangerZone || leftBottomX > width * 0.35f
             }
 
             if (rightLane != null) {
@@ -128,8 +133,11 @@ class LaneDetector {
 
                 singleLineOffset = (rightBottomX - vehicleCenterX) / width
 
-                // Right lane line is too close to vehicle center
-                singleLineWarning = rightBottomX < width * 0.62f
+                val rightLineInCenterDangerZone =
+                    rightBottomX in (width * centerDangerMinX)..(width * centerDangerMaxX)
+
+                singleLineWarning =
+                    rightLineInCenterDangerZone || rightBottomX < width * 0.65f
             }
 
             releaseMats(gray, blurred, edges, mask, roiEdges, lines, roiPoints)
@@ -149,6 +157,12 @@ class LaneDetector {
 
         val leftBottomX = xAtY(leftLane, laneBottomY)
         val rightBottomX = xAtY(rightLane, laneBottomY)
+
+        val leftLineInCenterDangerZone =
+            leftBottomX in (width * centerDangerMinX)..(width * centerDangerMaxX)
+
+        val rightLineInCenterDangerZone =
+            rightBottomX in (width * centerDangerMinX)..(width * centerDangerMaxX)
 
         val laneWidth = rightBottomX - leftBottomX
 
@@ -175,7 +189,10 @@ class LaneDetector {
         val vehicleCenterX = width / 2f
         val offsetRatio = (vehicleCenterX - laneCenterX) / width
 
-        val laneWarning = abs(offsetRatio) >= warningOffsetRatio
+        val laneWarning =
+            abs(offsetRatio) >= warningOffsetRatio ||
+                    leftLineInCenterDangerZone ||
+                    rightLineInCenterDangerZone
 
         releaseMats(gray, blurred, edges, mask, roiEdges, lines, roiPoints)
 

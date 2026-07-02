@@ -40,7 +40,7 @@ class YoloDetector(context: Context) {
 
     // Detection thresholds
     private val confidenceThreshold = 0.20f
-    private val brakeConfidenceThreshold = 0.55f
+    private val brakeConfidenceThreshold = 0.50f
     private val minAreaRatio = 0.06f
     private val minWidthRatio = 0.16f
     private val minHeightRatio = 0.16f
@@ -50,8 +50,8 @@ class YoloDetector(context: Context) {
     private val ownVehicleIgnoreTopRatio = 0.58f
     private val ownVehicleIgnoreBottomRatio = 0.90f
     private val wideOwnVehicleAspectRatio = 3.0f
-    private val brakeLaneMinX = 0.42f
-    private val brakeLaneMaxX = 0.58f
+    private val brakeLaneMinX = 0.40f
+    private val brakeLaneMaxX = 0.60f
 
     // COCO class IDs used for FCW
     private val targetClasses = mapOf(
