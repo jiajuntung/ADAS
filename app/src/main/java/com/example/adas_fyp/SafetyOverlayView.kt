@@ -4,46 +4,20 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.util.AttributeSet
-import android.view.View
 import android.graphics.Rect
 import android.graphics.RectF
+import android.util.AttributeSet
+import android.view.View
 
 class SafetyOverlayView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
+
     private val boxPaint = Paint().apply {
         color = Color.GREEN
         style = Paint.Style.STROKE
         strokeWidth = 6f
-    }
-
-    private var fcwBox: Rect? = null
-    private var fcwImageWidth: Int = 1
-    private var fcwImageHeight: Int = 1
-
-    fun setFcwBox(box: Rect?, imageWidth: Int, imageHeight: Int) {
-        fcwBox = box
-        fcwImageWidth = imageWidth
-        fcwImageHeight = imageHeight
-        invalidate()
-    }
-
-    fun clearFcwBox() {
-        fcwBox = null
-        invalidate()
-    }
-
-    private var roadOverlayVisible: Boolean = true
-    fun setRoadOverlayVisible(visible: Boolean) {
-        roadOverlayVisible = visible
-        invalidate()
-    }
-    private val lanePaint = Paint().apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
-        strokeWidth = 8f
     }
 
     private val warningPaint = Paint().apply {
@@ -52,7 +26,29 @@ class SafetyOverlayView @JvmOverloads constructor(
         strokeWidth = 8f
     }
 
+    private var fcwBox: Rect? = null
+    private var fcwImageWidth: Int = 1
+    private var fcwImageHeight: Int = 1
+
+    private var roadOverlayVisible: Boolean = true
     private var warningMode: String = "NORMAL"
+
+    fun setFcwBox(box: Rect?, imageWidth: Int, imageHeight: Int) {
+        fcwBox = box
+        fcwImageWidth = imageWidth.coerceAtLeast(1)
+        fcwImageHeight = imageHeight.coerceAtLeast(1)
+        invalidate()
+    }
+
+    fun clearFcwBox() {
+        fcwBox = null
+        invalidate()
+    }
+
+    fun setRoadOverlayVisible(visible: Boolean) {
+        roadOverlayVisible = visible
+        invalidate()
+    }
 
     fun setMode(mode: String) {
         warningMode = mode

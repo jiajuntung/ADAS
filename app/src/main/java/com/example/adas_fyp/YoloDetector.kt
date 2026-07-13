@@ -39,13 +39,13 @@ class YoloDetector(context: Context) {
     private val outputCount = 2100
 
     // Detection thresholds
-    private val confidenceThreshold = 0.20f
-    private val brakeConfidenceThreshold = 0.50f
-    private val minAreaRatio = 0.06f
-    private val minWidthRatio = 0.16f
-    private val minHeightRatio = 0.16f
-    private val egoLaneMinX = 0.30f
-    private val egoLaneMaxX = 0.70f
+    private val confidenceThreshold = 0.16f
+    private val brakeConfidenceThreshold = 0.45f
+    private val minAreaRatio = 0.040f
+    private val minWidthRatio = 0.10f
+    private val minHeightRatio = 0.10f
+    private val egoLaneMinX = 0.33f
+    private val egoLaneMaxX = 0.67f
     private val minObjectBottomRatio = 0.35f
     private val ownVehicleIgnoreTopRatio = 0.58f
     private val ownVehicleIgnoreBottomRatio = 0.90f

@@ -3,12 +3,11 @@ package com.example.adas_fyp
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Rect
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.media.AudioManager
-import android.media.ToneGenerator
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -41,7 +40,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private lateinit var safetyOverlay: SafetyOverlayView
     private lateinit var fpsText: TextView
     private lateinit var cameraExecutor: ExecutorService
-    private val toneGenerator = ToneGenerator(AudioManager.STREAM_ALARM, 50)
+    private val warningSound = WarningSoundPlayer()
 
     // Own vehicle motion detection for LVSA
     private lateinit var sensorManager: SensorManager
@@ -53,11 +52,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var latestOwnMotionStatus = "Motion: -"
 
     private var ownMotionHitCount = 0
-    private val ownVehicleMotionHitThreshold = 3
+    private val ownVehicleMotionHitThreshold = 4
 
-    private val ownVehicleMotionSuppressMs = 1500L
+    private val ownVehicleMotionSuppressMs = 2500L
     private val ownVehicleStationaryRequiredMs = 1000L
-    private val ownVehicleAccelThreshold = 0.35f
+    private val ownVehicleAccelThreshold = 0.60f
 
     // LDW
     private val laneDetector = LaneDetector()
@@ -65,7 +64,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var lastLaneWarningTime = 0L
     private val laneWarningCooldownMs = 5000L
     private var laneDepartureStartTime: Long? = null
-    private val laneDepartureDurationMs = 1000L
+    private val laneDepartureDurationMs = 500L
     private var lastLaneIssueDetectedTime = 0L
     private val laneIssueGraceMs = 1000L
 
@@ -85,10 +84,34 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var fcwWarningCounter = 0
     private var lastFcwWarningTime = 0L
     private var fcwDangerActive = false
-    private val fcwWarningThreshold = 2
-    private val fcwCooldownMs = 5000L
+    private val fcwWarningThreshold = 1
+    private val fcwCooldownMs = 3500L
     private var fcwSafeCounter = 0
     private val fcwSafeThreshold = 8
+    private var fcwLastWarnedAreaRatio = 0f
+    private val fcwRewarnAreaIncreaseRatio = 1.45f
+
+    // FCW time-to-collision (TTC) tracking.
+    // Instead of firing on apparent size alone, we track how fast the lead
+    // object's box is growing (looming) to estimate whether it is closing in.
+    private var fcwPrevBox: Rect? = null
+    private var fcwPrevTime = 0L
+    private var fcwSmoothHeightRatio = 0f
+    private var fcwSmoothGrowth = 0f             // smoothed growth rate -> steady TTC, less flip-flopping
+    private val fcwHeightEma = 0.6f              // weight kept on the previous smoothed height
+    private val fcwGrowthEma = 0.5f              // weight kept on the previous smoothed growth rate
+    private val fcwSameObjectIou = 0.2f          // min IoU to treat two frames as the same vehicle (was 0.3)
+    private val fcwTtcThresholdSec = 2.5f        // warn only if collision is < this many seconds away
+    private val fcwImminentHeightRatio = 0.55f   // box already fills this much height -> already too close
+
+
+    // Pure-vision ego-motion (no GPS / no IMU). Used to suppress warnings when the
+    // car is essentially stopped -- a big source of false LDW (red light, parking)
+    // and false FCW (stopped behind a car).
+    private var latestEgoMotion = 0f
+    private val egoMovingThreshold = 4f          // mean luma diff above this = moving. CALIBRATE on-device.
+    private val ldwRequireEgoMotion = false      // warning trigger enabled; do not block LDW by vision-motion
+    private val fcwRequireEgoMotion = false      // warning trigger enabled; do not block FCW by vision-motion
 
     // Camera
     private var useBackCamera = true
@@ -116,7 +139,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var debugMode = true
     private var ecoMode = false
 
-    private var fcwFrameInterval = 10
+    private var fcwFrameInterval = 5
     private var ldwFrameInterval = 3
     private var dmsFrameInterval = 8
 
@@ -129,6 +152,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var lastLeadVehicleAlertTime = 0L
     private var latestLeadVehicleStatus = "LVSA: -"
 
+    // A real "front car pulled away" shows up as the box shrinking over several
+    // consecutive frames, not as a single jittery small frame or a lost detection.
+    private var leadShrinkStreak = 0
+    private var leadWasShrinkingBeforeLost = false
+
     // COCO class ids: car, motorcycle, bus, truck
     // If you replace the model with your custom 20-class model, this set must be changed.
     private val leadVehicleClassIds = setOf(2, 3, 5, 7)
@@ -136,10 +164,25 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val leadVehicleStableMs = 1500L
     private val leadVehicleMovedDropRatio = 0.25f
     private val leadVehicleLostGraceMs = 1200L
+    private val leadVehicleLostMaxMs = 3000L         // lost longer than this w/o prior shrink = dropout, give up quietly
     private val leadVehicleAlertCooldownMs = 10000L
     private val minLeadVehicleAreaRatio = 0.025f
     private val leadVehicleMinX = 0.38f
     private val leadVehicleMaxX = 0.62f
+    private val leadShrinkStreakRequired = 3
+    // consecutive shrinking frames before we trust "moved away"
+
+    private var currentWarningPriority = 0
+    private var currentWarningEndTime = 0L
+    private var warningToken = 0
+    private var latestFcwDangerNow = false
+    private var lastFcwDangerTime = 0L
+    private val fcwDangerHoldMs = 3000L
+
+    private val PRIORITY_LVSA = 1
+    private val PRIORITY_LDW = 2
+    private val PRIORITY_DMS = 3
+    private val PRIORITY_FCW = 4
 
     private val requestCameraPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -192,18 +235,31 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
 
         btnTestFCW.setOnClickListener {
-            safetyOverlay.setMode("FCW")
-            showWarning("BRAKE!", Color.parseColor("#CCFF0000"))
+            showAdasWarning(
+                message = "BRAKE!",
+                backgroundColor = Color.parseColor("#CCFF0000"),
+                overlayMode = "FCW",
+                priority = PRIORITY_FCW,
+                durationMs = 2500L
+            )
         }
 
         btnTestLDW.setOnClickListener {
-            safetyOverlay.setMode("LDW")
-            showWarning("LANE WARNING", Color.parseColor("#CCFFA500"))
+            showAdasWarning(
+                message = "LANE WARNING",
+                backgroundColor = Color.parseColor("#CCFFA500"),
+                overlayMode = "LDW",
+                priority = PRIORITY_LDW
+            )
         }
 
         btnTestDMS.setOnClickListener {
-            safetyOverlay.setMode("DMS")
-            showWarning("DROWSINESS WARNING", Color.parseColor("#CCFF0000"))
+            showAdasWarning(
+                message = "DROWSINESS WARNING",
+                backgroundColor = Color.parseColor("#CCFF0000"),
+                overlayMode = "DMS",
+                priority = PRIORITY_DMS
+            )
         }
 
         btnStatusMode.setOnClickListener {
@@ -369,9 +425,28 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         fcwWarningCounter = 0
         fcwSafeCounter = 0
         fcwDangerActive = false
+        fcwLastWarnedAreaRatio = 0f
+        resetFcwTracker()
         laneDepartureStartTime = null
         eyeClosedStartTime = null
         resetLeadVehicleState()
+        latestEgoMotion = 0f
+
+        latestFcwDangerNow = false
+        lastFcwDangerTime = 0L
+
+        currentWarningPriority = 0
+        currentWarningEndTime = 0L
+        warningToken++
+        warningText.visibility = View.GONE
+        safetyOverlay.setMode("NORMAL")
+    }
+
+    private fun resetFcwTracker() {
+        fcwPrevBox = null
+        fcwPrevTime = 0L
+        fcwSmoothHeightRatio = 0f
+        fcwSmoothGrowth = 0f
     }
 
     private fun clearLeadVehicleTracking() {
@@ -380,6 +455,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         leadVehicleReferenceArea = 0f
         lastLeadVehicleArea = 0f
         lastLeadVehicleDetectedTime = 0L
+        leadShrinkStreak = 0
+        leadWasShrinkingBeforeLost = false
     }
 
     private fun resetLeadVehicleState() {
@@ -433,23 +510,39 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             val observedDuration = currentTime - (leadVehicleSeenStartTime ?: currentTime)
 
             if (!leadVehicleWaiting) {
-                leadVehicleReferenceArea = maxOf(leadVehicleReferenceArea, currentArea)
-                latestLeadVehicleStatus = "LVSA: observing ${observedDuration / 1000.0}s"
+                // Smooth the reference area instead of taking the max. Using the max lets
+                // a single jittery large frame inflate the reference, after which normal
+                // box jitter looks like a 25% drop and fires a false "moved" alert.
+                leadVehicleReferenceArea =
+                    0.7f * leadVehicleReferenceArea + 0.3f * currentArea
+                latestLeadVehicleStatus =
+                    "LVSA: observing ${String.format("%.1f", observedDuration / 1000.0)}s"
 
                 if (observedDuration >= leadVehicleStableMs) {
                     leadVehicleWaiting = true
+                    leadShrinkStreak = 0
                     latestLeadVehicleStatus = "LVSA: waiting"
                 }
             } else {
-                val movedByAreaDrop =
-                    leadVehicleReferenceArea > 0f &&
+                // Count consecutive frames where the car is getting smaller (moving away).
+                // The 0.98 factor ignores tiny jitter so only real shrinking counts.
+                if (currentArea < lastLeadVehicleArea * 0.98f) {
+                    leadShrinkStreak++
+                } else {
+                    leadShrinkStreak = 0
+                }
+                leadWasShrinkingBeforeLost = leadShrinkStreak >= 2
+
+                val movedAway =
+                    leadShrinkStreak >= leadShrinkStreakRequired &&
+                            leadVehicleReferenceArea > 0f &&
                             currentArea <= leadVehicleReferenceArea * (1f - leadVehicleMovedDropRatio)
 
                 latestLeadVehicleStatus =
-                    "LVSA: waiting Area:${String.format("%.3f", currentArea)}"
+                    "LVSA: waiting Area:${String.format("%.3f", currentArea)} shrink:$leadShrinkStreak"
 
                 if (
-                    movedByAreaDrop &&
+                    movedAway &&
                     !result.collisionWarning &&
                     currentTime - lastLeadVehicleAlertTime >= leadVehicleAlertCooldownMs
                 ) {
@@ -458,9 +551,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     clearLeadVehicleTracking()
 
                     runOnUiThread {
-                        showWarning(
-                            "FRONT VEHICLE MOVED",
-                            Color.parseColor("#CC2196F3")
+                        showAdasWarning(
+                            message = "FRONT VEHICLE MOVED",
+                            backgroundColor = Color.parseColor("#CC2196F3"),
+                            overlayMode = "NORMAL",
+                            priority = PRIORITY_LVSA
                         )
                     }
                 }
@@ -468,12 +563,16 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
             lastLeadVehicleArea = currentArea
         } else {
+            // Detection lost. A car doesn't only disappear by driving off -- occlusion,
+            // flicker and low light drop the box too. Only call it "moved" if the box was
+            // already clearly shrinking right before it vanished; otherwise it's a dropout.
             if (leadVehicleWaiting) {
                 val lostDuration = currentTime - lastLeadVehicleDetectedTime
                 latestLeadVehicleStatus = "LVSA: waiting / lost"
 
                 if (
-                    lostDuration >= leadVehicleLostGraceMs &&
+                    leadWasShrinkingBeforeLost &&
+                    lostDuration in leadVehicleLostGraceMs..leadVehicleLostMaxMs &&
                     currentTime - lastLeadVehicleAlertTime >= leadVehicleAlertCooldownMs
                 ) {
                     lastLeadVehicleAlertTime = currentTime
@@ -481,11 +580,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     clearLeadVehicleTracking()
 
                     runOnUiThread {
-                        showWarning(
-                            "FRONT VEHICLE MOVED",
-                            Color.parseColor("#CC2196F3")
+                        showAdasWarning(
+                            message = "FRONT VEHICLE MOVED",
+                            backgroundColor = Color.parseColor("#CC2196F3"),
+                            overlayMode = "NORMAL",
+                            priority = PRIORITY_LVSA
                         )
                     }
+                } else if (lostDuration > leadVehicleLostMaxMs) {
+                    // Gone too long without a prior shrink -> treat as a dropout and stop quietly.
+                    clearLeadVehicleTracking()
+                    latestLeadVehicleStatus = "LVSA: lost"
                 }
             } else {
                 if (
@@ -498,6 +603,81 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 latestLeadVehicleStatus = "LVSA: no lead"
             }
         }
+    }
+
+    private fun isOwnVehicleStoppedOrSettling(): Boolean {
+        if (motionSensor == null) {
+            return false
+        }
+
+        // FCW/LDW are driving warnings. They should not trigger when the
+        // vehicle is stopped or still settling at a traffic light / parking area.
+        // "Motion: moving" is only set after several strong motion samples, so
+        // small phone vibration should not keep FCW active.
+        return latestOwnMotionStatus != "Motion: moving"
+    }
+
+    private fun shouldSuppressLdwBecauseStopped(): Boolean {
+        return isOwnVehicleStoppedOrSettling()
+    }
+
+    // Tracks the lead object's box height across frames to estimate time-to-collision.
+    // Returns TTC in seconds; 99f means "not approaching / not enough data yet".
+    // Also updates fcwSmoothHeightRatio, used to detect an already-too-close object.
+    private fun updateFcwTtc(result: YoloDetectionResult): Float {
+        val box = result.boundingBox
+        val now = System.currentTimeMillis()
+
+        if (box == null || result.imageHeight <= 0) {
+            resetFcwTracker()
+            return 99f
+        }
+
+        val heightRatio = box.height().toFloat() / result.imageHeight.toFloat()
+
+        // Is this the same vehicle as last frame? IoU guards against mixing two
+        // different objects, which would make the growth estimate meaningless.
+        val prev = fcwPrevBox
+        val sameObject = prev != null && iou(prev, box) >= fcwSameObjectIou
+
+        if (!sameObject) {
+            fcwPrevBox = box
+            fcwPrevTime = now
+            fcwSmoothHeightRatio = heightRatio
+            return 99f
+        }
+
+        val prevSmooth = fcwSmoothHeightRatio
+        fcwSmoothHeightRatio = fcwHeightEma * prevSmooth + (1f - fcwHeightEma) * heightRatio
+
+        val dt = (now - fcwPrevTime) / 1000f
+        fcwPrevBox = box
+        fcwPrevTime = now
+
+        if (dt <= 0f || prevSmooth <= 0.001f) {
+            return 99f
+        }
+
+        // Relative growth rate of apparent height ≈ closing speed.
+        // Smoothing it stops TTC from flip-flopping across the threshold, which is what
+        // made FCW feel "sometimes sensitive, sometimes not".
+        // TTC ≈ 1 / (relative growth per second).
+        val rawGrowth = (fcwSmoothHeightRatio - prevSmooth) / (prevSmooth * dt)
+        fcwSmoothGrowth = fcwGrowthEma * fcwSmoothGrowth + (1f - fcwGrowthEma) * rawGrowth
+
+        return if (fcwSmoothGrowth > 0.01f) 1f / fcwSmoothGrowth else 99f
+    }
+
+    private fun iou(a: Rect, b: Rect): Float {
+        val left = maxOf(a.left, b.left)
+        val top = maxOf(a.top, b.top)
+        val right = minOf(a.right, b.right)
+        val bottom = minOf(a.bottom, b.bottom)
+
+        val inter = maxOf(0, right - left).toFloat() * maxOf(0, bottom - top).toFloat()
+        val union = a.width().toFloat() * a.height() + b.width().toFloat() * b.height() - inter
+
+        return if (union > 0f) inter / union else 0f
     }
 
     private fun applyDebugMode() {
@@ -518,13 +698,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private fun applyPerformanceMode() {
         if (ecoMode) {
-            fcwFrameInterval = 12
+            fcwFrameInterval = 6
             ldwFrameInterval = 5
             dmsFrameInterval = 10
             btnPerformanceMode.text = "Mode: Eco"
             Toast.makeText(this, "Eco Mode enabled", Toast.LENGTH_SHORT).show()
         } else {
-            fcwFrameInterval = 10
+            fcwFrameInterval = 5
             ldwFrameInterval = 3
             dmsFrameInterval = 8
             btnPerformanceMode.text = "Mode: Normal"
@@ -699,17 +879,43 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun showWarning(message: String, backgroundColor: Int) {
+    private fun showAdasWarning(
+        message: String,
+        backgroundColor: Int,
+        overlayMode: String,
+        priority: Int,
+        durationMs: Long = 2000L
+    ) {
+        val now = System.currentTimeMillis()
+
+        // If a higher-priority warning is still active, do not replace it
+        if (now < currentWarningEndTime && priority < currentWarningPriority) {
+            return
+        }
+
+        currentWarningPriority = priority
+        currentWarningEndTime = now + durationMs
+        warningToken++
+
+        val thisWarningToken = warningToken
+
+        safetyOverlay.setMode(overlayMode)
+
         warningText.text = message
         warningText.setBackgroundColor(backgroundColor)
         warningText.visibility = View.VISIBLE
 
-        toneGenerator.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 500)
+        warningSound.playForMessage(message)
 
         Handler(Looper.getMainLooper()).postDelayed({
-            warningText.visibility = View.GONE
-            safetyOverlay.setMode("NORMAL")
-        }, 2000)
+            // Only hide if this is still the latest warning
+            if (thisWarningToken == warningToken) {
+                warningText.visibility = View.GONE
+                safetyOverlay.setMode("NORMAL")
+                currentWarningPriority = 0
+                currentWarningEndTime = 0L
+            }
+        }, durationMs)
     }
 
     private fun updateFps(imageProxy: ImageProxy) {
@@ -737,6 +943,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             }
         }
 
+        // Pure-vision ego-motion: update every back frame (cheap, reads luma only).
+        // Runs before the detectors so both FCW and LDW can gate on it.
         val shouldRunFcw =
             !isFcwProcessing && backAnalysisFrameIndex % fcwFrameInterval == 0
 
@@ -746,12 +954,53 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             yoloDetector.detect(imageProxy) { result ->
                 isFcwProcessing = false
 
+                // Simple FCW trigger for road testing:
+                // YoloDetector already checks whether the object is close enough and in the centre.
+                // Do not block FCW using TTC / ego-motion here, because latestEgoMotion is not updated
+                // in the current code and it keeps Danger:false in your road-test video.
+                val box = result.boundingBox
+
+                val earlyFrontWarning = if (
+                    box != null &&
+                    result.objectDetected &&
+                    result.imageWidth > 0 &&
+                    result.imageHeight > 0
+                ) {
+                    val centerX = (box.left + box.right) / 2f / result.imageWidth.toFloat()
+                    val widthRatio = box.width().toFloat() / result.imageWidth.toFloat()
+                    val bottomY = box.bottom.toFloat() / result.imageHeight.toFloat()
+
+                    result.confidence >= 0.5f &&
+                            result.areaRatio >= 0.060f &&
+                            centerX in 0.38f..0.62f &&
+                            widthRatio <= 0.60f &&
+                            bottomY >= 0.45f
+                } else {
+                    false
+                }
+
+                val ownVehicleStopped = isOwnVehicleStoppedOrSettling()
+                val rawFcwDanger = result.collisionWarning || earlyFrontWarning
+
+                // FCW is a driving warning. If the ego vehicle is stopped / settling,
+                // do not trigger BRAKE for parked cars, traffic-light situations,
+                // or shop-lot roadside vehicles. The YOLO box can still be displayed.
+                val dangerNow = rawFcwDanger && !ownVehicleStopped
+
+                latestFcwDangerNow = dangerNow
+
+                if (dangerNow) {
+                    lastFcwDangerTime = System.currentTimeMillis()
+                }
+
                 latestFcwStatus =
-                    "YOLO ${result.className ?: "-"} " +
+                    "FCW ${result.className ?: "-"} " +
                             "Conf:${String.format("%.2f", result.confidence)} " +
-                            "Area:${String.format("%.4f", result.areaRatio)} " +
-                            "Box:${result.boundingBox?.width() ?: 0}x${result.boundingBox?.height() ?: 0} " +
-                            "Warn:${result.collisionWarning}"
+                            "Area:${String.format("%.3f", result.areaRatio)} " +
+                            "YoloWarn:${result.collisionWarning} " +
+                            "Early:$earlyFrontWarning " +
+                            "Stopped:$ownVehicleStopped " +
+                            "Danger:$dangerNow"
 
                 processLeadVehicleStartAlert(result)
 
@@ -764,7 +1013,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     updateDualStatusText()
                 }
 
-                if (result.collisionWarning) {
+                if (dangerNow) {
                     fcwWarningCounter++
                     fcwSafeCounter = 0
                 } else {
@@ -773,24 +1022,36 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
                     if (fcwSafeCounter >= fcwSafeThreshold) {
                         fcwDangerActive = false
+                        fcwLastWarnedAreaRatio = 0f
                         fcwSafeCounter = 0
                     }
                 }
 
                 val currentTimeForWarning = System.currentTimeMillis()
 
+                val objectMuchCloserAfterWarning =
+                    fcwDangerActive &&
+                            fcwLastWarnedAreaRatio > 0f &&
+                            result.areaRatio >= fcwLastWarnedAreaRatio * fcwRewarnAreaIncreaseRatio
+
                 if (
                     fcwWarningCounter >= fcwWarningThreshold &&
-                    !fcwDangerActive &&
+                    (!fcwDangerActive || objectMuchCloserAfterWarning) &&
                     currentTimeForWarning - lastFcwWarningTime >= fcwCooldownMs
                 ) {
                     lastFcwWarningTime = currentTimeForWarning
                     fcwWarningCounter = 0
                     fcwDangerActive = true
+                    fcwLastWarnedAreaRatio = result.areaRatio
 
                     runOnUiThread {
-                        safetyOverlay.setMode("FCW")
-                        showWarning("BRAKE!", Color.parseColor("#CCFF0000"))
+                        showAdasWarning(
+                            message = "BRAKE!",
+                            backgroundColor = Color.parseColor("#CCFF0000"),
+                            overlayMode = "FCW",
+                            priority = PRIORITY_FCW,
+                            durationMs = 2500L
+                        )
                     }
                 }
             }
@@ -799,19 +1060,54 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
 
         if (backAnalysisFrameIndex % ldwFrameInterval == 0) {
+
+            val nowForLdw = System.currentTimeMillis()
+
+            val ldwSuppressedBecauseStopped = shouldSuppressLdwBecauseStopped()
+            val ldwSuppressedBecauseFcw =
+                nowForLdw - lastFcwDangerTime <= fcwDangerHoldMs
+
+            if (ldwSuppressedBecauseStopped || ldwSuppressedBecauseFcw) {
+                laneDepartureStartTime = null
+                lastLaneIssueDetectedTime = 0L
+
+                latestLaneStatus = when {
+                    ldwSuppressedBecauseFcw -> "Lane: suppressed / FCW priority"
+                    else -> "Lane: suppressed / stopped"
+                }
+
+                runOnUiThread {
+                    safetyOverlay.setRoadOverlayVisible(false)
+                    updateDualStatusText()
+                }
+
+                imageProxy.close()
+                return
+            } else {
+                runOnUiThread {
+                    safetyOverlay.setRoadOverlayVisible(true)
+                }
+            }
+
             val result = laneDetector.detect(imageProxy)
+
+            // Simple LDW trigger for road testing:
+            // If LaneDetector says Warn:true, allow MainActivity to count it.
+            // Do not block LDW using latestEgoMotion, because latestEgoMotion is not updated
+            // in the current code and it keeps lane warnings from appearing.
+            val fcwDangerRecently =
+                System.currentTimeMillis() - lastFcwDangerTime <= fcwDangerHoldMs
+
+            val possibleLaneIssue =
+                (result.leftDetected || result.rightDetected) &&
+                        result.laneWarning &&
+                        !fcwDangerRecently
 
             latestLaneStatus =
                 "Lane L:${result.leftDetected} R:${result.rightDetected} " +
                         "Lines:${result.lineCount} " +
                         "Offset:${String.format("%.2f", result.offsetRatio)} " +
                         "Warn:${result.laneWarning}"
-
-            // If your LaneDetector supports single-lane warning, change this to:
-            // val possibleLaneIssue = (result.leftDetected || result.rightDetected) && result.laneWarning
-            val possibleLaneIssue =
-                (result.leftDetected || result.rightDetected) &&
-                        result.laneWarning
 
             val currentTimeForWarning = System.currentTimeMillis()
 
@@ -845,8 +1141,12 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     laneDepartureStartTime = null
 
                     runOnUiThread {
-                        safetyOverlay.setMode("LDW")
-                        showWarning("LANE WARNING", Color.parseColor("#CCFFA500"))
+                        showAdasWarning(
+                            message = "LANE WARNING",
+                            backgroundColor = Color.parseColor("#CCFFA500"),
+                            overlayMode = "LDW",
+                            priority = PRIORITY_LDW
+                        )
                     }
                 }
             } else {
@@ -908,8 +1208,12 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         eyeClosedStartTime = null
 
                         runOnUiThread {
-                            safetyOverlay.setMode("DMS")
-                            showWarning("DROWSINESS WARNING", Color.parseColor("#CCFF0000"))
+                            showAdasWarning(
+                                message = "DROWSINESS WARNING",
+                                backgroundColor = Color.parseColor("#CCFF0000"),
+                                overlayMode = "DMS",
+                                priority = PRIORITY_DMS
+                            )
                         }
                     }
                 } else {
@@ -948,7 +1252,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
 
         cameraExecutor.shutdown()
-        toneGenerator.release()
+        warningSound.release()
         drowsinessDetector.close()
         yoloDetector.close()
     }
