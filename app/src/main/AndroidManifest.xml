@@ -4,9 +4,23 @@
 
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- GPS speed is the primary ego-speed source for FCW headway/TTC and for
+         the LDW low-speed cutoff. FINE is required: COARSE does not report a
+         usable speed. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
     <uses-feature
         android:name="android.hardware.camera"
-        android:required="true"/>
+        android:required="true" />
+
+    <uses-feature
+        android:name="android.hardware.location.gps"
+        android:required="false" />
+
+    <uses-feature
+        android:name="android.hardware.sensor.gyroscope"
+        android:required="false" />
 
     <application
         android:allowBackup="true"
